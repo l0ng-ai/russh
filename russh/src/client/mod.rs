@@ -1292,7 +1292,9 @@ impl Session {
         #[allow(clippy::panic)] // false positive in select! macro
         while !self.common.disconnected {
             self.common.received_data = false;
-            let mut sent_keepalive = false;
+            // Set whenever the keepalive timer elapses, even if no keepalive
+            // could be sent yet, so that the timer is always re-armed below.
+            let mut keepalive_elapsed = false;
             tokio::select! {
                 r = &mut reading => {
                     let (stream_read, mut buffer, mut opening_cipher) = match r {
@@ -1323,6 +1325,7 @@ impl Session {
                     reading.set(start_reading(stream_read, buffer, opening_cipher));
                 }
                 () = &mut keepalive_timer => {
+                    keepalive_elapsed = true;
                     if let Some(ref mut enc) = self.common.encrypted {
                         if matches!(enc.state, EncryptedState::Authenticated) {
                             self.common.alive_timeouts = self.common.alive_timeouts.saturating_add(1);
@@ -1330,7 +1333,6 @@ impl Session {
                                 debug!("Timeout, server not responding to keepalives");
                                 return Err(crate::Error::KeepaliveTimeout.into());
                             }
-                            sent_keepalive = true;
                             self.send_keepalive(true)?;
                         }
                     }
@@ -1393,7 +1395,7 @@ impl Session {
                 // data from it.
                 self.common.alive_timeouts = 0;
             }
-            if self.common.received_data || sent_keepalive {
+            if self.common.received_data || keepalive_elapsed {
                 if let (futures::future::Either::Right(ref mut sleep), Some(d)) = (
                     keepalive_timer.as_mut().as_pin_mut(),
                     self.common.config.keepalive_interval,
@@ -1401,7 +1403,7 @@ impl Session {
                     sleep.as_mut().reset(tokio::time::Instant::now() + d);
                 }
             }
-            if !sent_keepalive {
+            if !keepalive_elapsed {
                 if let (futures::future::Either::Right(ref mut sleep), Some(d)) = (
                     inactivity_timer.as_mut().as_pin_mut(),
                     self.common.config.inactivity_timeout,
